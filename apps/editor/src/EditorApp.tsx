@@ -51,7 +51,7 @@ export function EditorApp() {
           fontFamily: 'sans-serif',
         }}
       >
-        <p>Carregando apresentação...</p>
+        <p>Loading presentation...</p>
       </div>
     );
   }
