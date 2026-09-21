@@ -109,7 +109,7 @@ export interface ProjectDocument {
 
 export class DeckBuilder {
   private project: ProjectDocument;
-  private theme: DeckTheme;
+  public readonly theme: DeckTheme;
   private elementCounter = 0;
   private pageCounter = 0;
 

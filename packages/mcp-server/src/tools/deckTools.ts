@@ -4,10 +4,11 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { DeckBuilder, THEMES, type ProjectDocument } from '../domain/deckBuilder.ts';
 
-const DEFAULT_DECKS_DIR = '/home/fabiominsait/estudos/slides/decks';
-const EDITOR_PUBLIC_DECKS_DIR =
-  '/home/fabiominsait/estudos/slides/localstudio/apps/editor/public/decks';
-const DEFAULT_HOST = 'http://localhost:4173';
+export interface DeckToolsOptions {
+  decksDir?: string;
+  publicDecksDir?: string;
+  host?: string;
+}
 
 async function ensureDir(dir: string) {
   await fs.mkdir(dir, { recursive: true });
@@ -36,8 +37,8 @@ async function saveDeckToDisk(dirPath: string, project: ProjectDocument) {
   );
 }
 
-async function exportDeckForWeb(deckSlug: string, project: ProjectDocument) {
-  await ensureDir(EDITOR_PUBLIC_DECKS_DIR);
+async function exportDeckForWeb(targetDir: string, deckSlug: string, project: ProjectDocument) {
+  await ensureDir(targetDir);
   const sharePayload = {
     schemaVersion: 1,
     shareId: deckSlug,
@@ -45,12 +46,24 @@ async function exportDeckForWeb(deckSlug: string, project: ProjectDocument) {
     updatedAt: project.updatedAt,
     project,
   };
-  const exportPath = path.join(EDITOR_PUBLIC_DECKS_DIR, `${deckSlug}.json`);
+  const exportPath = path.join(targetDir, `${deckSlug}.json`);
   await fs.writeFile(exportPath, JSON.stringify(sharePayload, null, 2), 'utf-8');
   return exportPath;
 }
 
-export function registerDeckTools(server: McpServer) {
+export function registerDeckTools(server: McpServer, options: DeckToolsOptions = {}) {
+  const decksDir =
+    options.decksDir ||
+    process.env.LOCALSTUDIO_DECKS_DIR ||
+    path.resolve(process.cwd(), 'decks');
+  const publicDecksDir =
+    options.publicDecksDir ||
+    process.env.LOCALSTUDIO_PUBLIC_DIR ||
+    path.resolve(process.cwd(), 'apps/editor/public/decks');
+  const defaultHost =
+    options.host ||
+    process.env.LOCALSTUDIO_HOST ||
+    'http://localhost:4173';
   // 1. localstudio_create_deck
   server.tool(
     'localstudio_create_deck',
@@ -78,12 +91,12 @@ export function registerDeckTools(server: McpServer) {
         builder.addTitleSlide({ badge, title, subtitle, author, tags, notes });
         const project = builder.build();
 
-        const deckDir = path.join(DEFAULT_DECKS_DIR, slug);
+        const deckDir = path.join(decksDir, slug);
         await saveDeckToDisk(deckDir, project);
-        await exportDeckForWeb(slug, project);
+        await exportDeckForWeb(publicDecksDir, slug, project);
 
-        const editorUrl = `${DEFAULT_HOST}/editor/?src=/editor/decks/${slug}.json`;
-        const presenterUrl = `${DEFAULT_HOST}/editor/?share=${slug}&src=/editor/decks/${slug}.json`;
+        const editorUrl = `${defaultHost}/editor/?src=/editor/decks/${slug}.json`;
+        const presenterUrl = `${defaultHost}/editor/?share=${slug}&src=/editor/decks/${slug}.json`;
 
         return {
           content: [
@@ -194,7 +207,7 @@ export function registerDeckTools(server: McpServer) {
       notes,
     }) => {
       try {
-        const deckDir = path.join(DEFAULT_DECKS_DIR, deckSlug);
+        const deckDir = path.join(decksDir, deckSlug);
         const projectPath = path.join(deckDir, 'project.json');
         const raw = await fs.readFile(projectPath, 'utf-8');
         const project: ProjectDocument = JSON.parse(raw);
@@ -249,7 +262,7 @@ export function registerDeckTools(server: McpServer) {
 
         const updatedProject = builder.build();
         await saveDeckToDisk(deckDir, updatedProject);
-        await exportDeckForWeb(deckSlug, updatedProject);
+        await exportDeckForWeb(publicDecksDir, deckSlug, updatedProject);
 
         return {
           content: [
@@ -285,13 +298,13 @@ export function registerDeckTools(server: McpServer) {
     {},
     async () => {
       try {
-        await ensureDir(DEFAULT_DECKS_DIR);
-        const entries = await fs.readdir(DEFAULT_DECKS_DIR, { withFileTypes: true });
+        await ensureDir(decksDir);
+        const entries = await fs.readdir(decksDir, { withFileTypes: true });
         const decks: any[] = [];
 
         for (const entry of entries) {
           if (entry.isDirectory()) {
-            const projectPath = path.join(DEFAULT_DECKS_DIR, entry.name, 'project.json');
+            const projectPath = path.join(decksDir, entry.name, 'project.json');
             try {
               const raw = await fs.readFile(projectPath, 'utf-8');
               const proj = JSON.parse(raw);
@@ -300,8 +313,8 @@ export function registerDeckTools(server: McpServer) {
                 name: proj.name,
                 pagesCount: proj.pages?.length ?? 0,
                 updatedAt: proj.updatedAt,
-                editorUrl: `${DEFAULT_HOST}/editor/?src=/editor/decks/${entry.name}.json`,
-                presenterUrl: `${DEFAULT_HOST}/editor/?share=${entry.name}&src=/editor/decks/${entry.name}.json`,
+                editorUrl: `${defaultHost}/editor/?src=/editor/decks/${entry.name}.json`,
+                presenterUrl: `${defaultHost}/editor/?share=${entry.name}&src=/editor/decks/${entry.name}.json`,
               });
             } catch {
               // Ignore non-project directory
@@ -335,7 +348,7 @@ export function registerDeckTools(server: McpServer) {
     },
     async ({ deckSlug }) => {
       try {
-        const projectPath = path.join(DEFAULT_DECKS_DIR, deckSlug, 'project.json');
+        const projectPath = path.join(decksDir, deckSlug, 'project.json');
         const raw = await fs.readFile(projectPath, 'utf-8');
         const proj: ProjectDocument = JSON.parse(raw);
 
@@ -352,8 +365,8 @@ export function registerDeckTools(server: McpServer) {
             hasNotes: Boolean(p.speakerNotes),
             speakerNotes: p.speakerNotes,
           })),
-          editorUrl: `${DEFAULT_HOST}/editor/?src=/editor/decks/${deckSlug}.json`,
-          presenterUrl: `${DEFAULT_HOST}/editor/?share=${deckSlug}&src=/editor/decks/${deckSlug}.json`,
+          editorUrl: `${defaultHost}/editor/?src=/editor/decks/${deckSlug}.json`,
+          presenterUrl: `${defaultHost}/editor/?share=${deckSlug}&src=/editor/decks/${deckSlug}.json`,
         };
 
         return {
@@ -388,9 +401,9 @@ export function registerDeckTools(server: McpServer) {
             text: JSON.stringify(
               {
                 deckSlug,
-                editorUrl: `${DEFAULT_HOST}/editor/?src=/editor/decks/${deckSlug}.json`,
-                presenterUrl: `${DEFAULT_HOST}/editor/?share=${deckSlug}&src=/editor/decks/${deckSlug}.json`,
-                rawJsonUrl: `${DEFAULT_HOST}/editor/decks/${deckSlug}.json`,
+                editorUrl: `${defaultHost}/editor/?src=/editor/decks/${deckSlug}.json`,
+                presenterUrl: `${defaultHost}/editor/?share=${deckSlug}&src=/editor/decks/${deckSlug}.json`,
+                rawJsonUrl: `${defaultHost}/editor/decks/${deckSlug}.json`,
               },
               null,
               2,

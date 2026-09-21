@@ -8,11 +8,12 @@
     "localstudio-mcp": "./src/index.ts"
   },
   "scripts": {
-    "start": "node src/index.ts"
+    "start": "node src/index.ts",
+    "test": "vitest run tests"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.0",
-    "zod": "^3.24.2"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.0.1"
