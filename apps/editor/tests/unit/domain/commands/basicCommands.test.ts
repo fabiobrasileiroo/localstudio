@@ -393,6 +393,46 @@ describe('editor commands', () => {
     expect(project.elements['text-title']).toMatchObject({ text: 'AI Design Revolution' });
   });
 
+  it('preserves imported paragraph runs when an unchanged text editor commits', () => {
+    const baseProject = sampleProject.createSampleProject();
+    const titleElement = baseProject.elements['text-title'];
+    if (!titleElement || titleElement.type !== 'text') {
+      throw new Error('Expected the sample project title to be text');
+    }
+    const project = {
+      ...baseProject,
+      elements: {
+        ...baseProject.elements,
+        'text-title': {
+          ...titleElement,
+          paragraphs: [
+            {
+              align: titleElement.align,
+              fill: titleElement.fill,
+              fontFamily: titleElement.fontFamily,
+              fontSize: titleElement.fontSize,
+              fontStyle: 'normal' as const,
+              fontWeight: titleElement.fontWeight,
+              indent: 0,
+              lineHeight: titleElement.lineHeight ?? 1.05,
+              marginLeft: 0,
+              spaceAfter: 0,
+              spaceBefore: 0,
+              text: titleElement.text,
+            },
+          ],
+        },
+      },
+    };
+
+    const next = new basicCommands.UpdateTextContentCommand('text-title', titleElement.text).execute(
+      project,
+    );
+
+    expect(next).toBe(project);
+    expect(next.elements['text-title']).toMatchObject({ paragraphs: project.elements['text-title'].paragraphs });
+  });
+
   it('updates text style immutably', () => {
     const project = sampleProject.createSampleProject();
     const next = new basicCommands.UpdateElementStyleCommand('text-title', {
@@ -421,6 +461,27 @@ describe('editor commands', () => {
       fontSize: 96,
       opacity: 1,
     });
+  });
+
+  it('applies text color to selected character ranges without changing the whole text fill', () => {
+    const project = sampleProject.createSampleProject();
+    const first = new basicCommands.UpdateElementStyleCommand('text-title', {
+      fill: '#FF0000',
+      textColorRange: { start: 0, end: 2 },
+    }).execute(project);
+    const next = new basicCommands.UpdateElementStyleCommand('text-title', {
+      fill: '#0000FF',
+      textColorRange: { start: 1, end: 4 },
+    }).execute(first);
+
+    expect(next.elements['text-title']).toMatchObject({
+      fill: '#37FD76',
+      colorRanges: [
+        { start: 0, end: 1, fill: '#FF0000' },
+        { start: 1, end: 4, fill: '#0000FF' },
+      ],
+    });
+    expect(project.elements['text-title']).not.toHaveProperty('colorRanges');
   });
 
   it('clears shape fill and border style immutably', () => {

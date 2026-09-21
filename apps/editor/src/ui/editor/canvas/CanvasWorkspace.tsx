@@ -5,11 +5,12 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type FocusEvent as ReactFocusEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from 'react';
-import type Konva from 'konva';
+import Konva from 'konva';
 import { Circle, Group, Image as KonvaImage, Layer, Rect, Stage, Transformer } from 'react-konva';
 import type {
   AlignMode,
@@ -64,6 +65,30 @@ function getRenderedTextContentHeight(textNode: Konva.Text): number {
   return height;
 }
 
+function getEditingTextVisualBounds(
+  node: Konva.Node | null | undefined,
+  element: Extract<DesignElement, { type: 'text' }>,
+) {
+  if (!node) return undefined;
+
+  if (node instanceof Konva.Text) {
+    const height = getRenderedTextContentHeight(node);
+    const freeHeight = node.height() - height;
+    const top =
+      element.verticalAlign === 'middle'
+        ? node.y() + freeHeight / 2
+        : element.verticalAlign === 'bottom'
+          ? node.y() + freeHeight
+          : node.y();
+    return { height, top };
+  }
+
+  const stage = node.getStage();
+  if (!stage) return undefined;
+  const bounds = node.getClientRect({ relativeTo: stage });
+  return { height: bounds.height, top: bounds.y };
+}
+
 interface CanvasWorkspaceProps {
   project: ProjectDocument;
   activePageId: string;
@@ -102,6 +127,7 @@ interface CanvasWorkspaceProps {
   canTranslateSelection?: boolean;
   isTranslating?: boolean;
   translationNotice?: string | undefined;
+  activeTextSelection?: { elementId: string; start: number; end: number } | undefined;
   onAlignSelectedElement?: ((mode: AlignMode) => void) | undefined;
   onAnimationPreviewAdvance?: (() => void) | undefined;
   onBringSelectedElementForward?: (() => void) | undefined;
@@ -130,6 +156,9 @@ interface CanvasWorkspaceProps {
   onSendSelectedElementBackward?: (() => void) | undefined;
   onTranslateSelectedText?: (() => void) | undefined;
   onEditSelectionGrid?: (() => void) | undefined;
+  onTextEditSelectionChange?:
+    | ((elementId: string, range: { start: number; end: number }) => void)
+    | undefined;
   onUpdateImageCrop?: ((elementId: string, patch: ImageCropPatch) => void) | undefined;
   onUpdateElementFrame?: ((elementId: string, patch: ElementFramePatch) => void) | undefined;
   onUpdateElementFrames?: ((patches: Record<string, ElementFramePatch>) => void) | undefined;
@@ -201,6 +230,7 @@ export function CanvasWorkspace({
   canTranslateSelection = false,
   isTranslating = false,
   translationNotice,
+  activeTextSelection,
   onAlignSelectedElement,
   onAnimationPreviewAdvance,
   onBackgroundPreviewPoint,
@@ -222,6 +252,7 @@ export function CanvasWorkspace({
   onSendSelectedElementBackward,
   onTranslateSelectedText,
   onEditSelectionGrid,
+  onTextEditSelectionChange,
   onUpdateImageCrop,
   onUpdateElementFrame,
   onUpdateElementFrames,
@@ -231,11 +262,17 @@ export function CanvasWorkspace({
   const nodeRefs = useRef<Record<string, Konva.Node | null>>({});
   const artboardRef = useRef<HTMLDivElement>(null);
   const suppressNextBackgroundDoubleClickRef = useRef(false);
+  const suppressNextCanvasClickRef = useRef(false);
+  const suppressNextArtboardClickRef = useRef(false);
   const textInputRef = useRef<HTMLTextAreaElement>(null);
+  const onTextEditSelectionChangeRef = useRef(onTextEditSelectionChange);
   const [stageSize, setStageSize] = useState({ width: 768, height: 432 });
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [editingTextValue, setEditingTextValue] = useState('');
   const [editingTextHeight, setEditingTextHeight] = useState<number | undefined>(undefined);
+  const [editingTextVisualBounds, setEditingTextVisualBounds] = useState<
+    { height: number; top: number } | undefined
+  >(undefined);
   const [fontRenderVersion, setFontRenderVersion] = useState(0);
   const [processingBlinkOn, setProcessingBlinkOn] = useState(false);
   const [backgroundPreviewPoint, setBackgroundPreviewPoint] = useState<{
@@ -379,6 +416,7 @@ export function CanvasWorkspace({
           'bottom-center',
           'bottom-right',
         ] as const);
+
   const setElementNodeRef = useCallback((elementId: string, node: Konva.Node | null) => {
     nodeRefs.current[elementId] = node;
   }, []);
@@ -395,6 +433,50 @@ export function CanvasWorkspace({
     },
     [],
   );
+
+  useEffect(() => {
+    onTextEditSelectionChangeRef.current = onTextEditSelectionChange;
+  }, [onTextEditSelectionChange]);
+
+  useEffect(() => {
+    if (!editingTextId) return;
+    const editingId = editingTextId;
+
+    function handleDocumentPointerDown(event: PointerEvent) {
+      if (!(event.target instanceof Element)) return;
+      if (
+        event.target.closest(
+          '.canvas-text-editor, .text-selection-toolbar, .scrolling-text-toolbar-shell',
+        )
+      ) {
+        return;
+      }
+      if (!(event.target instanceof HTMLCanvasElement)) return;
+
+      const editorRect = textInputRef.current?.getBoundingClientRect();
+      const clickedInsideEditor =
+        editorRect &&
+        event.clientX >= editorRect.left &&
+        event.clientX <= editorRect.right &&
+        event.clientY >= editorRect.top &&
+        event.clientY <= editorRect.bottom;
+      if (clickedInsideEditor) return;
+
+      suppressNextCanvasClickRef.current = true;
+      window.requestAnimationFrame(() => {
+        suppressNextCanvasClickRef.current = false;
+      });
+      onUpdateTextContent?.(editingId, editingTextValue);
+      setEditingTextId(null);
+      setEditingTextValue('');
+      setEditingTextHeight(undefined);
+      setEditingTextVisualBounds(undefined);
+      onSelectSlide?.();
+    }
+
+    document.addEventListener('pointerdown', handleDocumentPointerDown, true);
+    return () => document.removeEventListener('pointerdown', handleDocumentPointerDown, true);
+  }, [editingTextId, editingTextValue, onSelectSlide, onUpdateTextContent]);
 
   useEffect(() => {
     const selectedNodes = selection.elementIds
@@ -432,7 +514,26 @@ export function CanvasWorkspace({
     if (!editingTextId) return;
     textInputRef.current?.focus();
     textInputRef.current?.select();
+    if (textInputRef.current) {
+      onTextEditSelectionChangeRef.current?.(editingTextId, {
+        start: textInputRef.current.selectionStart,
+        end: textInputRef.current.selectionEnd,
+      });
+    }
   }, [editingTextId]);
+
+  useEffect(() => {
+    if (!editingTextId || activeTextSelection?.elementId !== editingTextId) return;
+    const input = textInputRef.current;
+    if (!input) return;
+    if (
+      input.selectionStart === activeTextSelection.start &&
+      input.selectionEnd === activeTextSelection.end
+    ) {
+      return;
+    }
+    input.setSelectionRange(activeTextSelection.start, activeTextSelection.end);
+  }, [activeTextSelection, editingTextId, editingTextValue]);
 
   useEffect(() => {
     const fontSet = document.fonts;
@@ -804,10 +905,18 @@ export function CanvasWorkspace({
   function startTextEditing(element: DesignElement) {
     if (readOnly) return;
     if (element.type !== 'text') return;
+    const visualBounds = getEditingTextVisualBounds(nodeRefs.current[element.id], element);
     onSelectElement?.(element.id);
     setEditingTextId(element.id);
     setEditingTextValue(element.text);
-    setEditingTextHeight(element.height);
+    setEditingTextHeight(
+      Math.max(element.height, textTranslationLayout.getMinimumTextFrameHeight(element)),
+    );
+    setEditingTextVisualBounds(
+      visualBounds
+        ? { height: visualBounds.height, top: visualBounds.top }
+        : undefined,
+    );
   }
 
   function commitTextEditing() {
@@ -815,12 +924,28 @@ export function CanvasWorkspace({
     onUpdateTextContent?.(editingTextId, editingTextValue);
     setEditingTextId(null);
     setEditingTextHeight(undefined);
+    setEditingTextVisualBounds(undefined);
+  }
+
+  function handleTextEditorBlur(event: ReactFocusEvent<HTMLTextAreaElement>) {
+    if (editingTextId) {
+      handleTextEditorSelectionChange(editingTextId, event.currentTarget);
+    }
+    if (
+      event.relatedTarget instanceof Element &&
+      event.relatedTarget.closest('.text-selection-toolbar, .scrolling-text-toolbar-shell')
+    ) {
+      return;
+    }
+    commitTextEditing();
   }
 
   function cancelTextEditing() {
+    if (editingTextId) onTextEditSelectionChange?.(editingTextId, { start: 0, end: 0 });
     setEditingTextId(null);
     setEditingTextValue('');
     setEditingTextHeight(undefined);
+    setEditingTextVisualBounds(undefined);
   }
 
   function updateTextEditing(
@@ -839,6 +964,13 @@ export function CanvasWorkspace({
     if (nextHeight !== element.height) {
       onUpdateElementFrame?.(element.id, { height: nextHeight });
     }
+  }
+
+  function handleTextEditorSelectionChange(elementId: string, input: HTMLTextAreaElement) {
+    onTextEditSelectionChange?.(elementId, {
+      start: input.selectionStart,
+      end: input.selectionEnd,
+    });
   }
 
   function pickBackgroundSubject(
@@ -891,6 +1023,20 @@ export function CanvasWorkspace({
     return element;
   }
 
+  function getElementAtStagePoint(stage: Konva.Stage, point: { x: number; y: number }) {
+    return [...visibleElements].reverse().find((element) => {
+      const node = nodeRefs.current[element.id];
+      if (!node || !node.isVisible()) return false;
+      const rect = node.getClientRect({ relativeTo: stage });
+      return (
+        point.x >= rect.x &&
+        point.x <= rect.x + rect.width &&
+        point.y >= rect.y &&
+        point.y <= rect.y + rect.height
+      );
+    });
+  }
+
   function isClickableLinkedText(
     element: DesignElement,
   ): element is Extract<DesignElement, { type: 'text' }> {
@@ -930,6 +1076,10 @@ export function CanvasWorkspace({
       x: element.x * scaleX + (animationTransform?.x ?? 0),
       y: element.y * scaleY + (animationTransform?.y ?? 0),
       onClick: (event: Konva.KonvaEventObject<MouseEvent>) => {
+        if (suppressNextCanvasClickRef.current) {
+          event.cancelBubble = true;
+          return;
+        }
         if (!isInteractive) return;
         if (element.type === 'text' && element.hyperlink && (presentationMode || readOnly)) {
           event.cancelBubble = true;
@@ -1127,6 +1277,7 @@ export function CanvasWorkspace({
   }
 
   function handleStagePointerDown(event: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
+    suppressNextArtboardClickRef.current = false;
     const linkedTextElement = getLinkedTextElementFromEventTarget(event.target);
     if (linkedTextElement && (presentationMode || readOnly)) return;
     if (canAdvanceAnimationPreviewByClick) {
@@ -1136,6 +1287,7 @@ export function CanvasWorkspace({
     }
     if (backgroundSelectionMode || editingTextId) return;
     if (event.target !== event.target.getStage()) {
+      suppressNextArtboardClickRef.current = true;
       if (isCropModeActive) finishCropMode();
       return;
     }
@@ -1163,6 +1315,7 @@ export function CanvasWorkspace({
       if (!endPoint) return;
       const marqueeRect = getNormalizedStageRect(startPoint, endPoint);
       if (marqueeRect.width < 4 || marqueeRect.height < 4) return;
+      suppressNextArtboardClickRef.current = true;
       selectElementsInMarquee(marqueeRect);
     };
 
@@ -1184,6 +1337,27 @@ export function CanvasWorkspace({
     if (readOnly || backgroundSelectionMode || editingTextId) return;
     if (!(event.target instanceof HTMLCanvasElement)) return;
     onCanvasBackgroundDoubleClick?.();
+  }
+
+  function handleArtboardClick(event: ReactMouseEvent<HTMLDivElement>) {
+    if (suppressNextCanvasClickRef.current) return;
+    if (suppressNextArtboardClickRef.current) {
+      suppressNextArtboardClickRef.current = false;
+      return;
+    }
+    if (readOnly || backgroundSelectionMode || editingTextId) return;
+    if (!(event.target instanceof HTMLCanvasElement)) return;
+
+    const stage = stageRef?.current;
+    const canvasRect = event.target.getBoundingClientRect();
+    const pointer = stage
+      ? {
+          x: ((event.nativeEvent.clientX - canvasRect.left) / canvasRect.width) * stage.width(),
+          y: ((event.nativeEvent.clientY - canvasRect.top) / canvasRect.height) * stage.height(),
+        }
+      : undefined;
+    if (stage && pointer && getElementAtStagePoint(stage, pointer)) return;
+    onSelectSlide?.();
   }
 
   const marqueeRect = marqueeSelection
@@ -1257,6 +1431,7 @@ export function CanvasWorkspace({
           className="canvas-artboard"
           ref={artboardRef}
           style={{ background: pageBackground }}
+          onClick={handleArtboardClick}
           onDoubleClick={handleArtboardDoubleClick}
         >
           {showEditorOverlays &&
@@ -1391,7 +1566,7 @@ export function CanvasWorkspace({
                     key={`${element.id}-font-${fontRenderVersion}`}
                     nodeRef={nodeRef}
                     scale={{ x: scaleX, y: scaleY }}
-                    visible={editingTextId !== element.id}
+                    visible
                   />
                 );
               })}
@@ -1496,6 +1671,18 @@ export function CanvasWorkspace({
             ? visibleElements.map((element) => {
                 if (element.type !== 'text' || editingTextId !== element.id) return null;
 
+                const editorHeight = Math.max(
+                  element.height,
+                  editingTextHeight ?? element.height,
+                );
+                const editorPadding = TEXT_FRAME_PADDING * scaleY;
+                const visualEditorHeight = editingTextVisualBounds
+                  ? editingTextVisualBounds.height + editorPadding * 2
+                  : editorHeight * scaleY;
+                const visualEditorTop = editingTextVisualBounds
+                  ? editingTextVisualBounds.top - editorPadding
+                  : element.y * scaleY;
+
                 return (
                   <textarea
                     aria-label="Edit text"
@@ -1504,22 +1691,28 @@ export function CanvasWorkspace({
                     ref={textInputRef}
                     value={editingTextValue}
                     style={{
-                      color: element.fill,
+                      background: 'transparent',
+                      caretColor: element.fill,
+                      color: 'transparent',
+                      cursor: 'text',
                       fontFamily: element.fontFamily,
                       fontSize: `${element.fontSize * scaleY}px`,
                       fontWeight: element.fontWeight,
-                      height: `${Math.max(element.height, editingTextHeight ?? element.height) * scaleY}px`,
+                      height: `${visualEditorHeight}px`,
                       left: `${element.x * scaleX}px`,
                       lineHeight: element.lineHeight ?? 1.05,
-                      padding: `${TEXT_FRAME_PADDING * scaleY}px`,
+                      padding: `${editorPadding}px`,
+                      pointerEvents: 'auto',
                       textAlign: element.align,
-                      top: `${element.y * scaleY}px`,
+                      top: `${visualEditorTop}px`,
                       transform: `rotate(${element.rotation}deg)`,
+                      userSelect: 'text',
                       width: `${element.width * scaleX}px`,
                     }}
-                    onBlur={commitTextEditing}
+                    onBlur={handleTextEditorBlur}
                     onChange={(event) => {
                       updateTextEditing(element, event.currentTarget);
+                      handleTextEditorSelectionChange(element.id, event.currentTarget);
                     }}
                     onKeyDown={(event) => {
                       if (event.key === 'Escape') {
@@ -1530,6 +1723,15 @@ export function CanvasWorkspace({
                         event.preventDefault();
                         commitTextEditing();
                       }
+                    }}
+                    onKeyUp={(event) => {
+                      handleTextEditorSelectionChange(element.id, event.currentTarget);
+                    }}
+                    onMouseUp={(event) => {
+                      handleTextEditorSelectionChange(element.id, event.currentTarget);
+                    }}
+                    onSelect={(event) => {
+                      handleTextEditorSelectionChange(element.id, event.currentTarget);
                     }}
                   />
                 );
